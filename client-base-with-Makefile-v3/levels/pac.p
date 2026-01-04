@@ -1,0 +1,4 @@
+POS 7 2
+PASSO 0
+W
+S

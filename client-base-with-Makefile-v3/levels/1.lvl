@@ -1,0 +1,29 @@
+#DIM: linhas colunas
+DIM 20 20
+#TEMPO: ms por jogada
+TEMPO 1000
+#PAC: ficheiro do pacman
+PAC pac.p
+#MON: ficheiros dos monstros
+MON 1.m
+#MAPA (X=Parede, o=Vazio, @=Portal)
+XXXXXXXXXXXXXXXXXXXX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XooooooooooooooooooX
+XXXXXXXXXXXXXXXXXXXX
