@@ -133,37 +133,76 @@ int read_level(board_t* board, char* filename, char* dirname) {
     return 0;
 }
 
-// No common/parser.c
-int read_pacman(board_t* board) {
-    if (board->pacman_file[0] == '\0') return 0;
+int read_pacman(board_t* board, int points) {
+    pacman_t* pacman = &board->pacmans[0];
+    pacman->alive = 1;
+    pacman->points = points;
+    pacman->n_moves = 0;      // No servidor, não carregamos movimentos pré-programados
+    pacman->current_move = 0;
 
-    FILE* f = fopen(board->pacman_file, "r");
-    if (!f) return -1;
+    // Caso não exista ficheiro .p, define valores por defeito
+    if (board->pacman_file[0] == '\0') {
+        pacman->passo = 0;
+        pacman->waiting = 0;
+        
+        // Procura a primeira célula vazia para colocar o Pacman
+        for (int i = 0; i < board->height; i++) {
+            for (int j = 0; j < board->width; j++) {
+                int idx = i * board->width + j;
+                if (board->board[idx].content == ' ') {
+                    pacman->pos_x = j;
+                    pacman->pos_y = i;
+                    board->board[idx].content = 'P';
+                    return 0;
+                }
+            }
+        }
+        return 0;
+    }
 
-    char line[256];
-    // FASE 1: Ler apenas configurações
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '\n') continue;
+    int fd = open(board->pacman_file, O_RDONLY);
+    if (fd < 0) return -1;
 
-        if (strncmp(line, "POS", 3) == 0) {
-            sscanf(line, "POS %d %d", &board->pacmans[0].pos_x, &board->pacmans[0].pos_y);
-            // Atualiza a célula no mapa do servidor
-            int idx = board->pacmans[0].pos_y * board->width + board->pacmans[0].pos_x;
-            board->board[idx].content = 'P';
-        } 
-        else if (strncmp(line, "PASSO", 5) == 0) {
-            sscanf(line, "PASSO %d", &board->pacmans[0].passo);
-            board->pacmans[0].waiting = board->pacmans[0].passo;
-        } 
+    int read;
+    char command[MAX_COMMAND_LENGTH];
+
+    // Ciclo de leitura do cabeçalho de configuração
+    while ((read = read_line(fd, command)) > 0) {
+        // Ignora comentários e linhas vazias
+        if (command[0] == '#' || command[0] == '\0') continue;
+
+        char *word = strtok(command, " \t\n");
+        if (!word) continue;
+
+        if (strcmp(word, "PASSO") == 0) { 
+            char *arg = strtok(NULL, " \t\n");
+            if (arg) {
+                pacman->passo = atoi(arg);
+                pacman->waiting = pacman->passo;
+                debug("Pacman carregado com passo: %d\n", pacman->passo);
+            }
+        }
+        else if (strcmp(word, "POS") == 0) {
+            char *arg1 = strtok(NULL, " \t\n");
+            char *arg2 = strtok(NULL, " \t\n");
+            if (arg1 && arg2) {
+                pacman->pos_x = atoi(arg1);
+                pacman->pos_y = atoi(arg2);
+                int idx = pacman->pos_y * board->width + pacman->pos_x;
+                board->board[idx].content = 'P';
+                debug("Pacman posicionado em: %d, %d\n", pacman->pos_x, pacman->pos_y);
+            }
+        }
         else {
-            // Se chegámos aqui, encontrámos movimentos. Paramos de ler.
+            // Se encontrar 'W', 'A', 'S', 'D' ou 'T', interrompemos a leitura.
+            // O servidor ignora o resto do ficheiro pois os comandos virão do pipe.
             break; 
         }
     }
-    fclose(f); // O Parser apenas configura o estado inicial
+
+    close(fd);
     return 0;
 }
-
 
 int read_ghosts(board_t* board) {
     for (int i = 0; i < board->n_ghosts; i++) {

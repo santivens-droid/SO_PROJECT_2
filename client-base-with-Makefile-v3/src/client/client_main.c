@@ -43,34 +43,6 @@ static void *receiver_thread(void *arg) {
     return NULL;
 }
 
-// No cliente: Thread de movimentos automáticos
-void* thread_movimento_automatico(void* arg) {
-    char* filename = (char*)arg;
-    FILE* f = fopen(filename, "r");
-    if (!f) return NULL;
-
-    char line[256];
-    // 1. Saltar o cabeçalho (POS e PASSO)
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "POS", 3) != 0 && strncmp(line, "PASSO", 5) != 0 && line[0] != '#') {
-            // Esta linha já contém movimentos! Processamos:
-            goto process_movements; 
-        }
-    }
-
-    while (fgets(line, sizeof(line), f)) {
-        process_movements:
-        for (int i = 0; line[i] != '\0'; i++) {
-            char cmd = toupper(line[i]);
-            if (cmd == 'W' || cmd == 'A' || cmd == 'S' || cmd == 'D') {
-                pacman_play(cmd); // Envia para o servidor via Pipe
-                sleep_ms(session_tempo); // Ritmo do jogo
-            }
-        }
-    }
-    fclose(f);
-    return NULL;
-}
 
 int main(int argc, char *argv[]) {
     if (argc != 3 && argc != 4) {
