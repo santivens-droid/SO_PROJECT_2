@@ -109,7 +109,6 @@ int move_pacman(board_t* board, int pacman_index, command_t* command) {
         board->board[new_index].content = 'P';
         return REACHED_PORTAL;
     }
-
     // Check for walls
     if (target_content == 'W') {
         goto move_pacman_invalid;
