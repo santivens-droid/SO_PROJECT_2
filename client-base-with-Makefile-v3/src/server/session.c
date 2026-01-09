@@ -9,6 +9,7 @@
 #include "display.h"
 #include "debug.h"
 #include "parser.h"
+#include "session.h"
 
 // Estrutura para sincronizar a paragem das threads da sessão
 typedef struct {
@@ -102,7 +103,7 @@ void* server_ghost_task(void* arg) {
             pthread_rwlock_wrlock(&a->board->state_lock);
             
             // Tenta mover o fantasma
-            int res = move_ghost(a->board, a->ghost_index, cmd);
+            move_ghost(a->board, a->ghost_index, cmd);
             
             pthread_rwlock_unlock(&a->board->state_lock);
 
@@ -126,8 +127,7 @@ void* server_ghost_task(void* arg) {
     return NULL;
 }
 
-void start_session(char* levels_dir, char* req_path, char* notif_path) {
-    board_t board;
+void start_session(char* levels_dir, char* req_path, char* notif_path, board_t* board_ptr) {
     struct dirent **namelist;
     
     // 1. Procurar ficheiros .lvl na diretoria fornecida
@@ -144,7 +144,7 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
 
     // 2. Carregar o primeiro nível da lista (namelist[0])
     // Usamos namelist[0]->d_name em vez de "level1.lvl"
-    if (load_level(&board, namelist[0]->d_name, levels_dir, 0) < 0) {
+    if (load_level(board_ptr, namelist[0]->d_name, levels_dir, 0) < 0) {
         // Limpeza de memória antes de sair em caso de erro
         for (int i = 0; i < n; i++) free(namelist[i]);
         free(namelist);
@@ -158,7 +158,7 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
     int fd_req = open(req_path, O_RDONLY);
 
     if (fd_notif < 0 || fd_req < 0) {
-        unload_level(&board);
+        unload_level(board_ptr);
         return;
     }
 
@@ -168,14 +168,14 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
 
     volatile int session_running = 1;
     pthread_t pacman_tid;
-    pacman_task_args p_args = {fd_req, &board, &session_running};
+    pacman_task_args p_args = {fd_req, board_ptr, &session_running};
 
     pthread_create(&pacman_tid, NULL, server_pacman_task, &p_args);
     // Aqui deveriam ser lançadas também as ghost_  threads da Parte 1
     pthread_t ghost_tids[MAX_GHOSTS];
-    for (int i = 0; i < board.n_ghosts; i++) {
+    for (int i = 0; i < board_ptr->n_ghosts; i++) {
         ghost_task_args* g_args = malloc(sizeof(ghost_task_args));
-        g_args->board = &board;
+        g_args->board = board_ptr;
         g_args->ghost_index = i;
         g_args->session_running = &session_running;
         
@@ -185,18 +185,18 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
         // Envio periódico do tabuleiro (Tarefa Gestora) [cite: 122]
         char op = (char)OP_CODE_BOARD;
         write(fd_notif, &op, 1);
-        write(fd_notif, &board.width, sizeof(int));
-        write(fd_notif, &board.height, sizeof(int));
-        write(fd_notif, &board.tempo, sizeof(int));
+        write(fd_notif, &board_ptr->width, sizeof(int));
+        write(fd_notif, &board_ptr->height, sizeof(int));
+        write(fd_notif, &board_ptr->tempo, sizeof(int));
         
         int victory = 0; // Implementar lógica de vitória conforme board.c
-        int game_over = !board.pacmans[0].alive;
+        int game_over = !board_ptr->pacmans[0].alive;
         write(fd_notif, &victory, sizeof(int));
         write(fd_notif, &game_over, sizeof(int));
-        write(fd_notif, &board.pacmans[0].points, sizeof(int));
+        write(fd_notif, &board_ptr->pacmans[0].points, sizeof(int));
 
-        char* board_str = get_board_displayed(&board);
-        write(fd_notif, board_str, board.width * board.height);
+        char* board_str = get_board_displayed(board_ptr);
+        write(fd_notif, board_str, board_ptr->width * board_ptr->height);
         free(board_str);
 
         if (game_over) {
@@ -204,17 +204,17 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
             session_running = 0;
         }
 
-        sleep_ms(board.tempo);
+        sleep_ms(board_ptr->tempo);
     }
     
     // Lógica de Terminação de Sessão: Limpeza obrigatória 
     debug("A limpar recursos da sessão...\n");
     pthread_join(pacman_tid, NULL); 
     // pthread_join(ghost_threads...)
-    for (int i = 0; i < board.n_ghosts; i++) {
+    for (int i = 0; i < board_ptr->n_ghosts; i++) {
         pthread_join(ghost_tids[i], NULL);
     }
-    unload_level(&board); // Libertar memória do tabuleiro
+    unload_level(board_ptr); // Libertar memória do tabuleiro
     close(fd_notif);
     close(fd_req);
 }
