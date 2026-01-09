@@ -5,172 +5,25 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <pthread.h>
-#include <semaphore.h>
-#include <errno.h>
-#include "session.h"
 #include "protocol.h"
 #include "debug.h"
-#include "board.h" // Necessário para aceder à struct board_t para os scores
 
-// --- Estruturas e Constantes ---
-
-#define MAX_BUFFER_SIZE 10 // Tamanho do buffer de pedidos pendentes
-
-typedef struct {
-    char req_pipe_path[MAX_PIPE_PATH_LENGTH];
-    char notif_pipe_path[MAX_PIPE_PATH_LENGTH];
-} connection_request_t;
-
-// --- Variáveis Globais ---
-
-// Controlo do Servidor
+// Variável global para sinalizar a paragem do servidor (externa)
 volatile sig_atomic_t server_shutdown = 0;
 char* global_fifo_registo = NULL;
-char* global_levels_dir = NULL;
-int global_max_games = 0;
 
-// Buffer Produtor-Consumidor
-connection_request_t request_buffer[MAX_BUFFER_SIZE];
-int buf_in = 0;
-int buf_out = 0;
-int buf_count = 0;
-
-pthread_mutex_t mutex_buffer = PTHREAD_MUTEX_INITIALIZER;
-sem_t sem_empty;
-sem_t sem_full;
-
-// Gestão de Sessões Ativas (para o SIGUSR1 - Top 5)
-// Guardamos ponteiros para os boards ativos para ler os scores
-board_t** active_games; 
-pthread_mutex_t mutex_sessions = PTHREAD_MUTEX_INITIALIZER;
-
-// --- Funções Auxiliares ---
-
-// Comparador para o qsort (ordem decrescente de pontos)
-int compare_scores(const void* a, const void* b) {
-    int score_a = (*(board_t**)a)->pacmans[0].points;
-    int score_b = (*(board_t**)b)->pacmans[0].points;
-    return score_b - score_a; 
-}
-
-// Handler para SIGUSR1: Gera log dos Top 5
-void handle_sigusr1(int sig) {
-    (void)sig;
-    
-    // 1. Bloquear acesso à lista de sessões para leitura consistente
-    pthread_mutex_lock(&mutex_sessions);
-
-    FILE* log = fopen("server_top_scores.log", "w");
-    if (!log) {
-        pthread_mutex_unlock(&mutex_sessions);
-        return;
-    }
-
-    fprintf(log, "=== TOP 5 JOGOS ATIVOS ===\n");
-    
-    // Criar array temporário para ordenar sem estragar o array global
-    int count = 0;
-    board_t* temp_list[global_max_games];
-    
-    for (int i = 0; i < global_max_games; i++) {
-        if (active_games[i] != NULL) {
-            temp_list[count++] = active_games[i];
-        }
-    }
-
-    if (count == 0) {
-        fprintf(log, "Nenhum jogo ativo no momento.\n");
-    } else {
-        // Ordenar
-        qsort(temp_list, count, sizeof(board_t*), compare_scores);
-
-        // Imprimir Top 5 (ou menos se não houver 5)
-        int limit = (count < 5) ? count : 5;
-        for (int i = 0; i < limit; i++) {
-            // Nota: O ID do cliente não está explicitamente no board_t original,
-            // mas podemos imprimir os pontos.
-            fprintf(log, "Rank #%d - Pontos: %d\n", i + 1, temp_list[i]->pacmans[0].points);
-        }
-    }
-
-    fclose(log);
-    pthread_mutex_unlock(&mutex_sessions);
-    debug("SIGUSR1 recebido: Log de pontuações gerado.\n");
-}
-
+// Handler para SIGINT (Ctrl+C) ou SIGTERM
 void handle_server_shutdown(int sig) {
     (void)sig;
     server_shutdown = 1;
-    // Opcional: Acordar threads presas no sem_wait se necessário, 
-    // mas o exit(0) forçado funciona para limpeza básica no contexto deste projeto.
-    if (global_fifo_registo) unlink(global_fifo_registo);
-    debug("\nSinal de paragem recebido. A encerrar...\n");
-    exit(0);
-}
-
-// --- Worker Thread (Consumidor) ---
-
-void* worker_thread(void* arg) {
-    int thread_id = *(int*)arg;
-    free(arg);
-
-    // 1. Bloquear SIGUSR1 nesta thread [cite: 163]
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGUSR1);
-    int s = pthread_sigmask(SIG_BLOCK, &set, NULL);
-    if (s != 0) debug("Erro ao bloquear SIGUSR1 na thread %d\n", thread_id);
-
-    debug("Worker %d iniciado e à espera de pedidos.\n", thread_id);
-
-    while (!server_shutdown) {
-        // 2. Esperar por um pedido (Consumidor)
-        sem_wait(&sem_full);
-        
-        pthread_mutex_lock(&mutex_buffer);
-        connection_request_t req = request_buffer[buf_out];
-        buf_out = (buf_out + 1) % MAX_BUFFER_SIZE;
-        buf_count--;
-        pthread_mutex_unlock(&mutex_buffer);
-        
-        sem_post(&sem_empty);
-
-        debug("Worker %d atendeu pedido: %s\n", thread_id, req.req_pipe_path);
-
-        // 3. Preparar o slot para o SIGUSR1 ler
-        // Precisamos que o start_session nos dê acesso ao board, ou modificamos session.c
-        // Assumindo a modificação proposta no session.c (ver abaixo):
-        
-        board_t local_board_ref;
-        // Inicializamos a zero para segurança
-        memset(&local_board_ref, 0, sizeof(board_t));
-
-        // Publicar o endereço desta board no array global no slot desta thread
-        pthread_mutex_lock(&mutex_sessions);
-        active_games[thread_id] = &local_board_ref; 
-        pthread_mutex_unlock(&mutex_sessions);
-
-        // 4. Iniciar a Sessão (Esta função é bloqueante enquanto o jogo decorre)
-        // NOTA: start_session tem de ser alterada para usar a memória apontada por active_games[thread_id]
-        // ou passarmos &local_board_ref para ela preencher.
-        // Vou assumir que passamos &local_board_ref como argumento extra ou que session.c
-        // foi alterado para aceitar board_t* externo.
-        
-        // Chamada adaptada (Requer alteração em session.c/h, ver notas):
-        start_session(global_levels_dir, req.req_pipe_path, req.notif_pipe_path, &local_board_ref);
-
-        // 5. Limpar slot após fim do jogo
-        pthread_mutex_lock(&mutex_sessions);
-        active_games[thread_id] = NULL;
-        pthread_mutex_unlock(&mutex_sessions);
-
-        debug("Worker %d terminou sessão.\n", thread_id);
+    if (global_fifo_registo) {
+        unlink(global_fifo_registo); // Limpeza física do pipe de registo
     }
-    return NULL;
+    debug("Sinal de paragem recebido. Servidor a encerrar...\n");
+    exit(0); 
 }
 
-// --- Main (Produtor / Tarefa Anfitriã) ---
+void start_session(char* levels_dir, char* req_path, char* notif_path);
 
 int main(int argc, char** argv) {
     if (argc != 4) {
@@ -178,105 +31,42 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    global_levels_dir = argv[1];
-    global_max_games = atoi(argv[2]);
+    char* levels_dir = argv[1];
     global_fifo_registo = argv[3];
 
-    if (global_max_games <= 0) {
-        fprintf(stderr, "max_games deve ser > 0\n");
-        return 1;
-    }
+    // Registar o tratamento de sinais conforme a nota de terminação externa
+    signal(SIGINT, handle_server_shutdown);
+    signal(SIGTERM, handle_server_shutdown);
 
-    // Inicialização de Logs e Sinais
     open_debug_file("server-debug.log");
-    
-    // Tratamento de SIGINT/SIGTERM
-    struct sigaction sa_term;
-    sa_term.sa_handler = handle_server_shutdown;
-    sigemptyset(&sa_term.sa_mask);
-    sa_term.sa_flags = 0;
-    sigaction(SIGINT, &sa_term, NULL);
-    sigaction(SIGTERM, &sa_term, NULL);
-
-    // Tratamento de SIGUSR1 (Apenas na Main, Workers bloqueiam)
-    struct sigaction sa_usr;
-    sa_usr.sa_handler = handle_sigusr1;
-    sigemptyset(&sa_usr.sa_mask);
-    sa_usr.sa_flags = SA_RESTART; // Reiniciar chamadas de sistema (como accept/read)
-    sigaction(SIGUSR1, &sa_usr, NULL);
-
-    // Ignorar SIGPIPE (Evita crash se cliente desconectar abruptamente)
-    signal(SIGPIPE, SIG_IGN);
-
-    // Inicialização de Estruturas de Dados
-    active_games = calloc(global_max_games, sizeof(board_t*));
-    
-    sem_init(&sem_empty, 0, MAX_BUFFER_SIZE);
-    sem_init(&sem_full, 0, 0);
-
-    // Criar FIFO de Registo
     unlink(global_fifo_registo);
     if (mkfifo(global_fifo_registo, 0666) < 0) {
         perror("Erro ao criar FIFO de registo");
         return 1;
     }
 
-    // Criar Thread Pool [cite: 131-132]
-    pthread_t* workers = malloc(sizeof(pthread_t) * global_max_games);
-    for (int i = 0; i < global_max_games; i++) {
-        int* id = malloc(sizeof(int));
-        *id = i;
-        if (pthread_create(&workers[i], NULL, worker_thread, id) != 0) {
-            perror("Falha ao criar worker thread");
-            exit(1);
-        }
-    }
+    debug("Servidor iniciado indefinidamente. Escutando: %s\n", global_fifo_registo);
 
-    debug("Servidor iniciado. Pool de %d threads. Escutando: %s\n", global_max_games, global_fifo_registo);
-
-    // Loop Principal (Produtor)
+    // Loop infinito de aceitação (sem temporizadores de inatividade)
     while (!server_shutdown) {
         int fd = open(global_fifo_registo, O_RDONLY);
-        if (fd < 0) {
-            if (errno == EINTR) continue; // Se interrompido por SIGUSR1, continua
-            perror("Erro ao abrir FIFO de registo");
-            break; 
-        }
+        if (fd < 0) break; // Erro fatal na leitura encerra o servidor
 
         char buffer[1 + 2 * MAX_PIPE_PATH_LENGTH];
-        ssize_t n = read(fd, buffer, sizeof(buffer));
-        
-        if (n > 0 && buffer[0] == (char)OP_CODE_CONNECT) {
-            connection_request_t req;
-            strncpy(req.req_pipe_path, buffer + 1, MAX_PIPE_PATH_LENGTH);
-            strncpy(req.notif_pipe_path, buffer + 1 + MAX_PIPE_PATH_LENGTH, MAX_PIPE_PATH_LENGTH);
+        if (read(fd, buffer, sizeof(buffer)) > 0 && buffer[0] == (char)OP_CODE_CONNECT) {
+            char req_path[MAX_PIPE_PATH_LENGTH + 1] = {0};
+            char notif_path[MAX_PIPE_PATH_LENGTH + 1] = {0};
             
-            debug("Main: Recebido pedido de conexão. A colocar no buffer...\n");
+            strncpy(req_path, buffer + 1, MAX_PIPE_PATH_LENGTH);
+            strncpy(notif_path, buffer + 1 + MAX_PIPE_PATH_LENGTH, MAX_PIPE_PATH_LENGTH);
 
-            // Produtor: Coloca no buffer
-            // Se o buffer estiver cheio, sem_wait bloqueia (Backpressure natural)
-            if (sem_wait(&sem_empty) == -1 && errno == EINTR) {
-                // Se foi interrompido por sinal, tenta de novo ou gere conforme necessário
-                close(fd);
-                continue; 
-            }
-
-            pthread_mutex_lock(&mutex_buffer);
-            request_buffer[buf_in] = req;
-            buf_in = (buf_in + 1) % MAX_BUFFER_SIZE;
-            buf_count++;
-            pthread_mutex_unlock(&mutex_buffer);
-
-            sem_post(&sem_full);
+            // Sessão única: Processa um cliente e espera que ele termine
+            start_session(levels_dir, req_path, notif_path);
         }
-        
         close(fd);
     }
 
-    // Limpeza (inalcançável se usar exit(0) no handler, mas boa prática)
     unlink(global_fifo_registo);
-    free(workers);
-    free(active_games);
     close_debug_file();
     return 0;
 }

@@ -4,7 +4,7 @@
 #include <stdarg.h>
 #include <time.h>
 
-FILE * debugfile=NULL;
+FILE * debugfile;
 
 void open_debug_file(char *filename) {
     debugfile = fopen(filename, "w");

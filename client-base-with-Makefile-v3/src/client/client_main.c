@@ -10,46 +10,80 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <pthread.h>
+
+typedef struct {
+    const char *filename;
+} auto_move_args;
 
 Board board;
 bool stop_execution = false;
-int tempo;
+int session_tempo = 500; 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// --- THREAD DE RECEÇÃO ---
 static void *receiver_thread(void *arg) {
     (void)arg;
-
     while (true) {
-        
-        Board board = receive_board_update();
-
-        if (!board.data || board.game_over == 1){
+        Board updated_board = receive_board_update();
+        if (!updated_board.data || updated_board.game_over == 1) {
             pthread_mutex_lock(&mutex);
             stop_execution = true;
             pthread_mutex_unlock(&mutex);
             break;
         }
-
         pthread_mutex_lock(&mutex);
-        tempo = board.tempo;
+        session_tempo = updated_board.tempo;
         pthread_mutex_unlock(&mutex);
 
-        draw_board_client(board);
+        draw_board_client(updated_board);
         refresh_screen();
-        if (board.data) free(board.data);
+        if (updated_board.data) free(updated_board.data);
     }
-
-    debug("Returning receiver thread...\n");
     return NULL;
 }
 
+// --- THREAD DE MOVIMENTO AUTOMÁTICO ---
+void* client_auto_move_thread(void* arg) {
+    auto_move_args* a = (auto_move_args*)arg;
+    FILE* fp = fopen(a->filename, "r");
+    if (!fp) return NULL;
 
+    char line[256];
+    while (true) {
+        pthread_mutex_lock(&mutex);
+        if (stop_execution) { pthread_mutex_unlock(&mutex); break; }
+        pthread_mutex_unlock(&mutex);
+
+        if (fgets(line, sizeof(line), fp) == NULL) {
+            rewind(fp);
+            continue;
+        }
+
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r' || line[0] == '\0') continue;
+        if (strncmp(line, "POS", 3) == 0 || strncmp(line, "PASSO", 5) == 0) continue;
+
+        for (int i = 0; line[i] != '\0'; i++) {
+            char cmd = (char)toupper((unsigned char)line[i]);
+            if (cmd == 'W' || cmd == 'A' || cmd == 'S' || cmd == 'D') {
+                pthread_mutex_lock(&mutex);
+                if (stop_execution) { pthread_mutex_unlock(&mutex); goto end; }
+                int wait = session_tempo;
+                pthread_mutex_unlock(&mutex);
+
+                pacman_play(cmd);
+                sleep_ms(wait);
+            }
+        }
+    }
+end:
+    fclose(fp);
+    return NULL;
+}
+
+// --- MAIN ---
 int main(int argc, char *argv[]) {
-    if (argc != 3 && argc != 4) {
-        fprintf(stderr,
-            "Usage: %s <client_id> <register_pipe> [commands_file]\n",
-            argv[0]);
+    if (argc < 3 || argc > 4) {
+        fprintf(stderr, "Usage: %s <id> <reg_pipe> [cmd_file]\n", argv[0]);
         return 1;
     }
 
@@ -57,105 +91,60 @@ int main(int argc, char *argv[]) {
     const char *register_pipe = argv[2];
     const char *commands_file = (argc == 4) ? argv[3] : NULL;
 
-    FILE *cmd_fp = NULL;
-    if (commands_file) {
-        cmd_fp = fopen(commands_file, "r");
-        if (!cmd_fp) {
-            perror("Failed to open commands file");
-            return 1;
-        }
-    }
-
-    char req_pipe_path[MAX_PIPE_PATH_LENGTH];
-    char notif_pipe_path[MAX_PIPE_PATH_LENGTH];
-
-    snprintf(req_pipe_path, MAX_PIPE_PATH_LENGTH,
-             "/tmp/%s_request", client_id);
-
-    snprintf(notif_pipe_path, MAX_PIPE_PATH_LENGTH,
-             "/tmp/%s_notification", client_id);
+    char req_path[MAX_PIPE_PATH_LENGTH], notif_path[MAX_PIPE_PATH_LENGTH];
+    snprintf(req_path, MAX_PIPE_PATH_LENGTH, "/tmp/%s_request", client_id);
+    snprintf(notif_path, MAX_PIPE_PATH_LENGTH, "/tmp/%s_notification", client_id);
 
     open_debug_file("client-debug.log");
 
-    if (pacman_connect(req_pipe_path, notif_pipe_path, register_pipe) != 0) {
-        perror("Failed to connect to server");
-        return 1;
+    if (pacman_connect(req_path, notif_path, register_pipe) != 0) return 1;
+
+    pthread_t recv_tid;
+    pthread_create(&recv_tid, NULL, receiver_thread, NULL);
+
+    pthread_t auto_tid;
+    auto_move_args a_args = {commands_file};
+    bool has_auto = (commands_file != NULL);
+
+    if (has_auto) {
+        pthread_create(&auto_tid, NULL, client_auto_move_thread, &a_args);
     }
 
-    pthread_t receiver_thread_id;
-    pthread_create(&receiver_thread_id, NULL, receiver_thread, NULL);
-
     terminal_init();
-    set_timeout(500);
-    draw_board_client(board);
-    refresh_screen();
-
-    char command;
-    int ch;
+    set_timeout(100);
 
     while (1) {
-
         pthread_mutex_lock(&mutex);
-        if (stop_execution){
-            pthread_mutex_unlock(&mutex);
-            break;
-        }
+        if (stop_execution) { pthread_mutex_unlock(&mutex); break; }
         pthread_mutex_unlock(&mutex);
 
-        if (cmd_fp) {
-            // Input from file
-            ch = fgetc(cmd_fp);
+        int ch = get_input();
+        if (ch == -1) continue;
 
-            if (ch == EOF) {
-                // Restart at the start of the file
-                rewind(cmd_fp);
-                continue;
-            }
+        char cmd = (char)toupper(ch);
 
-            command = (char)ch;
-
-            if (command == '\n' || command == '\r' || command == '\0')
-                continue;
-
-            command = toupper(command);
-            
-            // Wait for tempo, to not overflow pipe with requests
+        // A tecla 'Q' funciona SEMPRE (emergência/saída)
+        if (cmd == 'Q') {
             pthread_mutex_lock(&mutex);
-            int wait_for = tempo;
+            stop_execution = true;
             pthread_mutex_unlock(&mutex);
-
-            sleep_ms(wait_for);
-            
-        } else {
-            // Interactive input
-            command = get_input();
-            command = toupper(command);
-        }
-
-        if (command == '\0')
-            continue;
-
-        if (command == 'Q') {
-            debug("Client pressed 'Q', quitting game\n");
             break;
         }
 
-        debug("Command: %c\n", command);
-
-        pacman_play(command);
-
+        // --- LÓGICA DE BLOQUEIO DO TECLADO ---
+        // Se houver um ficheiro (has_auto == true), ignoramos W,A,S,D do teclado
+        if (!has_auto) {
+            if (cmd == 'W' || cmd == 'A' || cmd == 'S' || cmd == 'D') {
+                pacman_play(cmd);
+            }
+        }
     }
 
     pacman_disconnect();
-
-    pthread_join(receiver_thread_id, NULL);
-
-    if (cmd_fp)
-        fclose(cmd_fp);
+    pthread_join(recv_tid, NULL);
+    if (has_auto) pthread_join(auto_tid, NULL);
 
     pthread_mutex_destroy(&mutex);
-
     terminal_cleanup();
-
     return 0;
 }
