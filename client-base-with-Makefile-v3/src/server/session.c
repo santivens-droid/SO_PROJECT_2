@@ -17,6 +17,12 @@ typedef struct {
     volatile int* session_running;
 } pacman_task_args;
 
+typedef struct {
+    board_t* board;
+    int ghost_index;
+    volatile int* session_running;
+} ghost_task_args;
+
 void* server_pacman_task(void* arg) {
     pacman_task_args* a = (pacman_task_args*)arg;
     char op_code;
@@ -78,6 +84,45 @@ void* server_pacman_task(void* arg) {
     debug("Encerrando thread de escuta de comandos.\n");
     return NULL;
 }
+// --- CÓDIGO A ADICIONAR NO SESSION.C ---
+
+
+
+void* server_ghost_task(void* arg) {
+    ghost_task_args* a = (ghost_task_args*)arg;
+    ghost_t* ghost = &a->board->ghosts[a->ghost_index];
+
+    debug("Thread do Fantasma %d iniciada.\n", a->ghost_index);
+
+    while (*a->session_running) {
+        // 1. Verificar se o fantasma tem movimentos ou é aleatório
+        command_t* cmd = NULL;
+        
+        // Se houver movimentos pré-definidos no ficheiro .m
+        if (ghost->n_moves > 0) {
+            cmd = &ghost->moves[ghost->current_move % ghost->n_moves];
+        } else {
+            // Se não houver, cria um comando aleatório (R = Random)
+            static command_t random_cmd = {'R', 0, 0}; 
+            cmd = &random_cmd;
+        }
+
+        // 2. Bloquear o estado global para garantir consistência (igual ao Pacman)
+        pthread_rwlock_wrlock(&a->board->state_lock);
+        
+        // Executa o movimento (a lógica de colisão está dentro desta função)
+        move_ghost(a->board, a->ghost_index, cmd);
+        
+        pthread_rwlock_unlock(&a->board->state_lock);
+
+        // 3. Respeitar o tempo do jogo
+        sleep_ms(a->board->tempo);
+    }
+    
+    debug("Thread do Fantasma %d a encerrar.\n", a->ghost_index);
+    free(a);
+    return NULL;
+}
 
 void start_session(char* levels_dir, char* req_path, char* notif_path) {
     board_t board;
@@ -124,7 +169,20 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
     pacman_task_args p_args = {fd_req, &board, &session_running};
 
     pthread_create(&pacman_tid, NULL, server_pacman_task, &p_args);
-    // Aqui deveriam ser lançadas também as ghost_threads da Parte 1
+    // ... (código existente da thread do Pacman)
+    // --- ADICIONAR ISTO ---
+    pthread_t ghost_tids[MAX_GHOSTS];
+    for (int i = 0; i < board.n_ghosts; i++) {
+        ghost_task_args* g_args = malloc(sizeof(ghost_task_args));
+        g_args->board = &board;
+        g_args->ghost_index = i;
+        g_args->session_running = &session_running;
+        
+        if (pthread_create(&ghost_tids[i], NULL, server_ghost_task, g_args) != 0) {
+            perror("Erro ao criar thread do monstro");
+        }
+    }
+    // ----------------------
 
     while (session_running) {
         // Envio periódico do tabuleiro (Tarefa Gestora) [cite: 122]
@@ -156,7 +214,15 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
     debug("A limpar recursos da sessão...\n");
     pthread_join(pacman_tid, NULL); 
     // pthread_join(ghost_threads...)
-    
+    // ...
+
+
+    // --- ADICIONAR ISTO ---
+    for (int i = 0; i < board.n_ghosts; i++) {
+        pthread_join(ghost_tids[i], NULL);
+    }
+    // ----------------------
+    // ...
     unload_level(&board); // Libertar memória do tabuleiro
     close(fd_notif);
     close(fd_req);
