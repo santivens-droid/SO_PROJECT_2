@@ -5,7 +5,6 @@
 #define MAX_LEVELS 20
 #define MAX_FILENAME 256
 #define MAX_GHOSTS 25
-
 #include <pthread.h>
 
 typedef enum {

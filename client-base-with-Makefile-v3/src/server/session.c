@@ -22,6 +22,7 @@ typedef struct {
     board_t* board;
     int ghost_index;
     volatile int* session_running;
+    volatile int* level_finished;
 } ghost_task_args;
 
 void* server_pacman_task(void* arg) {
@@ -99,7 +100,7 @@ void* server_ghost_task(void* arg) {
 
     debug("Thread do Fantasma %d iniciada.\n", a->ghost_index);
 
-    while (*a->session_running) {
+    while (*a->session_running && !(*a->level_finished)) {
         // 1. Verificar se o fantasma tem movimentos ou é aleatório
         command_t* cmd = NULL;
         
@@ -129,85 +130,83 @@ void* server_ghost_task(void* arg) {
     return NULL;
 }
 
-void start_session(char* levels_dir, char* req_path, char* notif_path) {
+// ... (structs pacman_task_args e ghost_task_args mantêm-se iguais) ...
+// ... (funções server_pacman_task e server_ghost_task mantêm-se iguais) ...
+
+// Função start_session atualizada para integração com SIGUSR1
+void start_session(char* levels_dir, char* req_path, char* notif_path, board_t** active_game_slot) {
     board_t board;
     struct dirent **namelist;
     volatile int session_running = 1;
-    int score_acumulado=0;
-    // 1. Procurar ficheiros .lvl na diretoria fornecida
-    int n_levels = scandir(levels_dir, &namelist, filter_levels, alphasort);
-    
-    if (n_levels < 0) {
-        perror("Erro ao ler diretoria de níveis");
-        return;
+    int score_acumulado = 0;
+
+    // --- LIGAÇÃO AO SIGUSR1 ---
+    // Apontamos o slot global para a nossa variável local 'board'
+    // Assim o main.c consegue ler os pontos em tempo real
+    if (active_game_slot != NULL) {
+        *active_game_slot = &board;
     }
-    if (n_levels == 0) {
-        fprintf(stderr, "Nenhum nível (.lvl) encontrado em: %s\n", levels_dir);
+    // --------------------------
+
+    // 1. Procurar ficheiros .lvl
+    int n_levels = scandir(levels_dir, &namelist, filter_levels, alphasort);
+    if (n_levels <= 0) {
+        // Se falhar, limpamos o slot para evitar leituras de lixo
+        if (active_game_slot) *active_game_slot = NULL;
+        if (n_levels == 0) fprintf(stderr, "Nenhum nível em: %s\n", levels_dir);
+        else perror("Erro scandir");
         return;
     }
 
-    // 2. Abrir pipes e fazer Handshake (Apenas UMA vez por sessão)
+    // 2. Abrir pipes e Handshake
     int fd_notif = open(notif_path, O_WRONLY);
     int fd_req = open(req_path, O_RDONLY);
 
     if (fd_notif < 0 || fd_req < 0) {
-        // Limpar namelist se falhar a abertura
+        if (active_game_slot) *active_game_slot = NULL;
         for (int i = 0; i < n_levels; i++) free(namelist[i]);
         free(namelist);
         return;
     }
 
-    // Handshake: confirmar conexão ao cliente
     char ack[2] = {(char)OP_CODE_CONNECT, 0};
     write(fd_notif, ack, 2);
 
-    // --- 3. LOOP PRINCIPAL DE NÍVEIS ---
+    // --- 3. LOOP DE NÍVEIS ---
     for (int i = 0; i < n_levels && session_running; i++) {
         
-        debug("A iniciar nível %d/%d: %s\n", i + 1, n_levels, namelist[i]->d_name);
+        debug("Nível %d: %s\n", i + 1, namelist[i]->d_name);
 
-        // Carregar o nível atual
         if (load_level(&board, namelist[i]->d_name, levels_dir, score_acumulado) < 0) {
-            debug("Erro ao carregar nível %s. A abortar sessão.\n", namelist[i]->d_name);
             break;
         }
 
-        // Flag para controlar o fim deste nível específico (Portal)
         volatile int level_finished = 0;
 
-        // Preparar Threads
+        // Lançar Threads
         pthread_t pacman_tid;
-        // NOTA: Certifica-te que atualizaste a struct pacman_task_args para ter o campo level_finished
         pacman_task_args p_args = {fd_req, &board, &session_running, &level_finished};
-
         pthread_create(&pacman_tid, NULL, server_pacman_task, &p_args);
 
-        // Lançar Monstros
         pthread_t ghost_tids[MAX_GHOSTS];
         for (int g = 0; g < board.n_ghosts; g++) {
             ghost_task_args* g_args = malloc(sizeof(ghost_task_args));
             g_args->board = &board;
             g_args->ghost_index = g;
             g_args->session_running = &session_running;
-            
-            if (pthread_create(&ghost_tids[g], NULL, server_ghost_task, g_args) != 0) {
-                perror("Erro ao criar thread do monstro");
-                free(g_args);
-            }
+            g_args->level_finished = &level_finished;
+            pthread_create(&ghost_tids[g], NULL, server_ghost_task, g_args);
         }
 
-        // --- GAME LOOP (Nível Atual) ---
+        // Game Loop
         while (session_running && !level_finished) {
-            // Envio periódico do tabuleiro
             char op = (char)OP_CODE_BOARD;
             write(fd_notif, &op, 1);
             write(fd_notif, &board.width, sizeof(int));
             write(fd_notif, &board.height, sizeof(int));
             write(fd_notif, &board.tempo, sizeof(int));
             
-            // Verificar Vitória (apenas se for o último nível e acabou)
             int victory = 0; 
-            
             int game_over = !board.pacmans[0].alive;
             
             write(fd_notif, &victory, sizeof(int));
@@ -218,44 +217,31 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
             write(fd_notif, board_str, board.width * board.height);
             free(board_str);
 
-            if (game_over) {
-                debug("Game Over detetado.\n");
-                session_running = 0; // Isto vai quebrar o loop while e o loop for
-            }
+            if (game_over) session_running = 0;
 
             sleep_ms(board.tempo);
         }
 
-        // --- FIM DO NÍVEL: Limpeza de Threads ---
-        // Esperar pelo Pacman (ele sai do loop quando level_finished=1 ou session_running=0)
+        // Limpeza de Threads
+        // Forçar saída do Pacman do read() fechando o pipe (opcional mas robusto) ou apenas join
+        // Como usas pipes bloqueantes, o ideal seria enviar sinal ou fechar descritor, 
+        // mas o pthread_cancel resolve para sair do read.
+        pthread_cancel(pacman_tid); 
         pthread_join(pacman_tid, NULL);
 
-        // Forçar paragem dos monstros e esperar por eles
-        // Como os monstros podem estar num sleep(), o cancel é mais seguro na transição
         for (int g = 0; g < board.n_ghosts; g++) {
-            pthread_cancel(ghost_tids[g]); 
             pthread_join(ghost_tids[g], NULL);
         }
 
-        // Se completámos o último nível com sucesso
-        if (level_finished && i == n_levels - 1) {
-            debug("Vitória! Todos os níveis concluídos.\n");
-            // Aqui poderias enviar uma última frame com victory=1
-            session_running = 0;
-        }
-        if (session_running) {
-            score_acumulado = board.pacmans[0].points;
-        }
-        unload_level(&board); // Limpar memória do nível antes de carregar o próximo
-        }
+        if (session_running) score_acumulado = board.pacmans[0].points;
+        unload_level(&board);
+    } 
+
+    // Limpeza Final
+    if (active_game_slot) *active_game_slot = NULL; // Remover da lista pública
     
-    // 4. Limpeza Final da Sessão
-    debug("Sessão terminada. A limpar recursos...\n");
-    
-    // Só agora libertamos a lista de ficheiros
     for (int i = 0; i < n_levels; i++) free(namelist[i]);
     free(namelist);
-    
     close(fd_notif);
     close(fd_req);
 }
