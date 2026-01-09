@@ -1,7 +1,9 @@
 #ifndef DEBUG_H
 #define DEBUG_H
 // DEBUG FILE
+#include <stdio.h>  
 
+extern FILE *debugfile;
 void open_debug_file(char *filename);
 
 void close_debug_file();

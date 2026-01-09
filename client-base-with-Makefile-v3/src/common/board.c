@@ -9,8 +9,6 @@
 #include <pthread.h>
 #include "debug.h"
 
-FILE * debugfile;
-
 // Helper private function to find and kill pacman at specific position
 static int find_and_kill_pacman(board_t* board, int new_x, int new_y) {
     for (int p = 0; p < board->n_pacmans; p++) {
