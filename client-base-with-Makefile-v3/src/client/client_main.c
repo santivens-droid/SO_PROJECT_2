@@ -37,6 +37,7 @@ static void *receiver_thread(void *arg) {
 
         draw_board_client(board);
         refresh_screen();
+        if (board.data) free(board.data);
     }
 
     debug("Returning receiver thread...\n");

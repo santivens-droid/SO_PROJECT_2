@@ -17,6 +17,12 @@ typedef struct {
     volatile int* session_running;
 } pacman_task_args;
 
+typedef struct {
+    board_t* board;
+    int ghost_index;
+    volatile int* session_running;
+} ghost_task_args;
+
 void* server_pacman_task(void* arg) {
     pacman_task_args* a = (pacman_task_args*)arg;
     char op_code;
@@ -79,6 +85,47 @@ void* server_pacman_task(void* arg) {
     return NULL;
 }
 
+// Em session.c (ou num novo ficheiro de tarefas do servidor)
+
+
+void* server_ghost_task(void* arg) {
+    ghost_task_args* a = (ghost_task_args*)arg;
+    ghost_t* ghost = &a->board->ghosts[a->ghost_index];
+
+    debug("Thread do Fantasma %d iniciada.\n", a->ghost_index);
+
+    while (*a->session_running) {
+        // 1. Verificar se o fantasma tem movimentos definidos
+        if (ghost->n_moves > 0) {
+            command_t* cmd = &ghost->moves[ghost->current_move % ghost->n_moves];
+
+            pthread_rwlock_wrlock(&a->board->state_lock);
+            
+            // Tenta mover o fantasma
+            int res = move_ghost(a->board, a->ghost_index, cmd);
+            
+            pthread_rwlock_unlock(&a->board->state_lock);
+
+            // Se o movimento for baseado em turnos (T), a lógica interna de move_ghost
+            // já incrementa o ghost->current_move quando os turnos acabam.
+        } else {
+            // Movimento aleatório caso não haja comandos (fallback)
+            command_t random_cmd = {'R', 1, 1};
+            pthread_rwlock_wrlock(&a->board->state_lock);
+            move_ghost(a->board, a->ghost_index, &random_cmd);
+            pthread_rwlock_unlock(&a->board->state_lock);
+        }
+
+        // 2. O tempo de espera é ditado pelo 'tempo' do tabuleiro multiplicado pelo 'passo' do fantasma
+        // O move_ghost já lida com o 'waiting/passo', por isso aqui esperamos o tick base.
+        sleep_ms(a->board->tempo);
+    }
+
+    debug("Encerrando thread do Fantasma %d.\n", a->ghost_index);
+    free(a); // Libertar os argumentos alocados na main thread
+    return NULL;
+}
+
 void start_session(char* levels_dir, char* req_path, char* notif_path) {
     board_t board;
     struct dirent **namelist;
@@ -124,8 +171,16 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
     pacman_task_args p_args = {fd_req, &board, &session_running};
 
     pthread_create(&pacman_tid, NULL, server_pacman_task, &p_args);
-    // Aqui deveriam ser lançadas também as ghost_threads da Parte 1
-
+    // Aqui deveriam ser lançadas também as ghost_  threads da Parte 1
+    pthread_t ghost_tids[MAX_GHOSTS];
+    for (int i = 0; i < board.n_ghosts; i++) {
+        ghost_task_args* g_args = malloc(sizeof(ghost_task_args));
+        g_args->board = &board;
+        g_args->ghost_index = i;
+        g_args->session_running = &session_running;
+        
+        pthread_create(&ghost_tids[i], NULL, server_ghost_task, g_args);
+    }
     while (session_running) {
         // Envio periódico do tabuleiro (Tarefa Gestora) [cite: 122]
         char op = (char)OP_CODE_BOARD;
@@ -151,12 +206,14 @@ void start_session(char* levels_dir, char* req_path, char* notif_path) {
 
         sleep_ms(board.tempo);
     }
-
+    
     // Lógica de Terminação de Sessão: Limpeza obrigatória 
     debug("A limpar recursos da sessão...\n");
     pthread_join(pacman_tid, NULL); 
     // pthread_join(ghost_threads...)
-    
+    for (int i = 0; i < board.n_ghosts; i++) {
+        pthread_join(ghost_tids[i], NULL);
+    }
     unload_level(&board); // Libertar memória do tabuleiro
     close(fd_notif);
     close(fd_req);
