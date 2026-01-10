@@ -29,6 +29,9 @@ static void *receiver_thread(void *arg) {
             pthread_mutex_lock(&mutex);
             stop_execution = true;
             pthread_mutex_unlock(&mutex);
+            
+            if (updated_board.data) free(updated_board.data);
+            
             break;
         }
         pthread_mutex_lock(&mutex);
