@@ -42,6 +42,7 @@ int terminal_init() {
 
     // Clear the screen
     clear();
+    flushinp(); //limpar input
 
     return 0;
 }
