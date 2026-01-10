@@ -86,7 +86,10 @@ void executar_log_top_5() {
         qsort(temp_list, count, sizeof(board_t*), compare_scores);
         int limit = (count < 5) ? count : 5;
         for (int i = 0; i < limit; i++) {
-            fprintf(log, "Rank #%d - Pontos: %d\n", i + 1, temp_list[i]->pacmans[0].points);
+            fprintf(log, "Rank #%d - Jogador: %s - Pontos: %d\n", 
+            i + 1, 
+            temp_list[i]->player_id,  // Agora usamos o ID guardado
+            temp_list[i]->pacmans[0].points);
         }
     }
 

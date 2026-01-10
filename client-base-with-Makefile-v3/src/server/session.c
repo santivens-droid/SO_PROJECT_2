@@ -139,6 +139,27 @@ void start_session(char* levels_dir, char* req_path, char* notif_path, board_t**
     struct dirent **namelist;
     volatile int session_running = 1;
     int score_acumulado = 0;
+    memset(board.player_id, 0, sizeof(board.player_id));
+    
+    // Encontra a última barra '/' para ignorar a diretoria /tmp/
+    char *nome_base = strrchr(req_path, '/');
+    if (nome_base) {
+        nome_base++; // Avança a barra
+    } else {
+        nome_base = req_path;
+    }
+
+    // Copia até encontrar o underscore '_' de "_request"
+    char *underscore = strstr(nome_base, "_request");
+    if (underscore) {
+        size_t len = underscore - nome_base;
+        if (len >= sizeof(board.player_id)) len = sizeof(board.player_id) - 1;
+        strncpy(board.player_id, nome_base, len);
+        board.player_id[len] = '\0';
+    } else {
+        strcpy(board.player_id, "Unknown");
+    }
+    // -----------------------------------------------
 
     // --- LIGAÇÃO AO SIGUSR1 ---
     // Apontamos o slot global para a nossa variável local 'board'

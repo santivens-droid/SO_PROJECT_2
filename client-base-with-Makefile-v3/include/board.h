@@ -60,6 +60,7 @@ typedef struct {
     char ghosts_files[MAX_GHOSTS][256]; // files with monster movements
     int tempo; // Duracao de cada jogada???
     pthread_rwlock_t state_lock;
+    char player_id[50];
 } board_t;
 
 /*Move pacman/monster in a certain direction on the board must check for boundaries, walls and other monsters
