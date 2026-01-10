@@ -26,7 +26,7 @@ typedef struct {
 
 // Controlo do Servidor
 volatile sig_atomic_t server_shutdown = 0;
-volatile sig_atomic_t sigusr1_pending = 0;  // Nova flag para o Top 5
+volatile sig_atomic_t sigusr1_pending = 0;  // flag para o Top 5
 char* global_fifo_registo = NULL;
 char* global_levels_dir = NULL;
 int global_max_games = 0;
@@ -101,8 +101,6 @@ void executar_log_top_5() {
 void handle_server_shutdown(int sig) {
     (void)sig;
     server_shutdown = 1;
-    // Opcional: Acordar threads presas no sem_wait se necessário, 
-    // mas o exit(0) forçado funciona para limpeza básica no contexto deste projeto.
     if (global_fifo_registo) unlink(global_fifo_registo);
     debug("\nSinal de paragem recebido. A encerrar...\n");
     exit(0);
@@ -143,8 +141,6 @@ void* worker_thread(void* arg) {
         pthread_mutex_unlock(&mutex_sessions);
 
         // 4. Iniciar Sessão
-        // CORREÇÃO: Passamos o endereço do slot global (&active_games[thread_id])
-        // O session.c vai apontar este slot para o seu tabuleiro local.
         start_session(global_levels_dir, req.req_pipe_path, req.notif_pipe_path, &active_games[thread_id]);
 
         // 5. Limpar slot após fim (Segurança extra)
@@ -155,7 +151,9 @@ void* worker_thread(void* arg) {
         debug("Worker %d terminou sessão.\n", thread_id);
     }
     return NULL;
-}// --- Main (Produtor / Tarefa Anfitriã) ---
+}
+
+// --- Main (Produtor / Tarefa Anfitriã) ---
 
 int main(int argc, char** argv) {
     if (argc != 4) {
@@ -187,7 +185,7 @@ int main(int argc, char** argv) {
     struct sigaction sa_usr;
     sa_usr.sa_handler = handle_sigusr1;
     sigemptyset(&sa_usr.sa_mask);
-    sa_usr.sa_flags = 0; // REMOVIDO SA_RESTART para permitir interrupção imediata
+    sa_usr.sa_flags = 0;
     sigaction(SIGUSR1, &sa_usr, NULL);
 
     // Ignorar SIGPIPE (Evita crash se cliente desconectar abruptamente)
@@ -206,7 +204,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Criar Thread Pool [cite: 131-132]
+    // Criar Thread Pool
     pthread_t* workers = malloc(sizeof(pthread_t) * global_max_games);
     for (int i = 0; i < global_max_games; i++) {
         int* id = malloc(sizeof(int));
@@ -277,7 +275,7 @@ int main(int argc, char** argv) {
         close(fd);
     }
 
-    // Limpeza (inalcançável se usar exit(0) no handler, mas boa prática)
+    // Limpeza
     unlink(global_fifo_registo);
     free(workers);
     free(active_games);

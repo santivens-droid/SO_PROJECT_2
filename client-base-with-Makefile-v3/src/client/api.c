@@ -10,8 +10,6 @@
 #include <stdlib.h>
 #include <errno.h>
 
-// Variáveis privadas a este ficheiro
-
 struct Session {
   int id;
   int req_pipe;
@@ -46,7 +44,7 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
     }
     close(server_fd);
 
-    // 4. Abrir os pipes locais (Aqui a ordem importa!)
+    // 4. Abrir os pipes locais
     // O servidor deve abrir os lados opostos
     session.notif_pipe = open(notif_pipe_path, O_RDONLY);
     if (session.notif_pipe < 0) return 1;
@@ -72,7 +70,7 @@ int pacman_connect(char const *req_pipe_path, char const *notif_pipe_path, char 
     strncpy(session.notif_pipe_path, notif_pipe_path, MAX_PIPE_PATH_LENGTH);
     session.id = 1; 
 
-    return 0; // Sucesso
+    return 0;
 }
 
 void pacman_play(char command) {
@@ -103,7 +101,6 @@ int pacman_disconnect() {
     char op_code = OP_CODE_DISCONNECT;
     if (session.req_pipe >= 0) {
         if (write(session.req_pipe, &op_code, sizeof(char)) == -1) {
-            // Se falhar o aviso, registamos o erro mas continuamos a limpar
             error = 1; 
         }
     }

@@ -52,7 +52,6 @@ void* server_pacman_task(void* arg) {
                 command_t cmd = {move_dir, 1, 1};
                 
                 pthread_rwlock_wrlock(&a->board->state_lock);
-                // Move o pacman 0 (podes precisar de passar o ID real do cliente aqui)
                 
 
                 // 1. Guardar posição antes
@@ -90,9 +89,6 @@ void* server_pacman_task(void* arg) {
     debug("Encerrando thread de escuta de comandos.\n");
     return NULL;
 }
-// --- CÓDIGO A ADICIONAR NO SESSION.C ---
-
-
 
 void* server_ghost_task(void* arg) {
     ghost_task_args* a = (ghost_task_args*)arg;
@@ -130,10 +126,6 @@ void* server_ghost_task(void* arg) {
     return NULL;
 }
 
-// ... (structs pacman_task_args e ghost_task_args mantêm-se iguais) ...
-// ... (funções server_pacman_task e server_ghost_task mantêm-se iguais) ...
-
-// Função start_session atualizada para integração com SIGUSR1
 void start_session(char* levels_dir, char* req_path, char* notif_path, board_t** active_game_slot) {
     board_t board;
     struct dirent **namelist;
@@ -162,8 +154,6 @@ void start_session(char* levels_dir, char* req_path, char* notif_path, board_t**
     // -----------------------------------------------
 
     // --- LIGAÇÃO AO SIGUSR1 ---
-    // Apontamos o slot global para a nossa variável local 'board'
-    // Assim o main.c consegue ler os pontos em tempo real
     if (active_game_slot != NULL) {
         *active_game_slot = &board;
     }
@@ -244,9 +234,6 @@ void start_session(char* levels_dir, char* req_path, char* notif_path, board_t**
         }
 
         // Limpeza de Threads
-        // Forçar saída do Pacman do read() fechando o pipe (opcional mas robusto) ou apenas join
-        // Como usas pipes bloqueantes, o ideal seria enviar sinal ou fechar descritor, 
-        // mas o pthread_cancel resolve para sair do read.
         pthread_cancel(pacman_tid); 
         pthread_join(pacman_tid, NULL);
 
@@ -259,7 +246,7 @@ void start_session(char* levels_dir, char* req_path, char* notif_path, board_t**
     } 
 
     // Limpeza Final
-    if (active_game_slot) *active_game_slot = NULL; // Remover da lista pública
+    if (active_game_slot) *active_game_slot = NULL;
     
     for (int i = 0; i < n_levels; i++) free(namelist[i]);
     free(namelist);
