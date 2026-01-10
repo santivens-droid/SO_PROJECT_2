@@ -26,6 +26,7 @@ typedef struct {
 
 // Controlo do Servidor
 volatile sig_atomic_t server_shutdown = 0;
+volatile sig_atomic_t sigusr1_pending = 0;  // Nova flag para o Top 5
 char* global_fifo_registo = NULL;
 char* global_levels_dir = NULL;
 int global_max_games = 0;
@@ -54,12 +55,13 @@ int compare_scores(const void* a, const void* b) {
     return score_b - score_a; 
 }
 
-// Handler para SIGUSR1: Gera log dos Top 5
 void handle_sigusr1(int sig) {
     (void)sig;
-    
-    // 1. Bloquear acesso à lista de sessões para leitura consistente
-    pthread_mutex_lock(&mutex_sessions);
+    sigusr1_pending = 1; // Única operação segura permitida
+}
+
+void executar_log_top_5() {
+    pthread_mutex_lock(&mutex_sessions); // Seguro aqui, fora do handler
 
     FILE* log = fopen("server_top_scores.log", "w");
     if (!log) {
@@ -69,7 +71,6 @@ void handle_sigusr1(int sig) {
 
     fprintf(log, "=== TOP 5 JOGOS ATIVOS ===\n");
     
-    // Criar array temporário para ordenar sem estragar o array global
     int count = 0;
     board_t* temp_list[global_max_games];
     
@@ -82,21 +83,16 @@ void handle_sigusr1(int sig) {
     if (count == 0) {
         fprintf(log, "Nenhum jogo ativo no momento.\n");
     } else {
-        // Ordenar
         qsort(temp_list, count, sizeof(board_t*), compare_scores);
-
-        // Imprimir Top 5 (ou menos se não houver 5)
         int limit = (count < 5) ? count : 5;
         for (int i = 0; i < limit; i++) {
-            // Nota: O ID do cliente não está explicitamente no board_t original,
-            // mas podemos imprimir os pontos.
             fprintf(log, "Rank #%d - Pontos: %d\n", i + 1, temp_list[i]->pacmans[0].points);
         }
     }
 
     fclose(log);
     pthread_mutex_unlock(&mutex_sessions);
-    debug("SIGUSR1 recebido: Log de pontuações gerado.\n");
+    debug("Log de pontuações gerado com segurança.\n");
 }
 
 void handle_server_shutdown(int sig) {
@@ -188,7 +184,7 @@ int main(int argc, char** argv) {
     struct sigaction sa_usr;
     sa_usr.sa_handler = handle_sigusr1;
     sigemptyset(&sa_usr.sa_mask);
-    sa_usr.sa_flags = SA_RESTART; // Reiniciar chamadas de sistema (como accept/read)
+    sa_usr.sa_flags = 0; // REMOVIDO SA_RESTART para permitir interrupção imediata
     sigaction(SIGUSR1, &sa_usr, NULL);
 
     // Ignorar SIGPIPE (Evita crash se cliente desconectar abruptamente)
@@ -222,15 +218,34 @@ int main(int argc, char** argv) {
 
     // Loop Principal (Produtor)
     while (!server_shutdown) {
+        
         int fd = open(global_fifo_registo, O_RDONLY);
-        if (fd < 0) {
-            if (errno == EINTR) continue; // Se interrompido por SIGUSR1, continua
-            perror("Erro ao abrir FIFO de registo");
-            break; 
-        }
+            
+            if (fd < 0) {
+                if (errno == EINTR) {
+                    if (sigusr1_pending) {
+                        executar_log_top_5(); // Executa a lógica pesada aqui
+                        sigusr1_pending = 0;
+                    }
+                    continue; 
+                }
+                perror("Erro ao abrir FIFO de registo");
+                break; 
+            }
 
-        char buffer[1 + 2 * MAX_PIPE_PATH_LENGTH];
-        ssize_t n = read(fd, buffer, sizeof(buffer));
+            char buffer[1 + 2 * MAX_PIPE_PATH_LENGTH];
+            ssize_t n = read(fd, buffer, sizeof(buffer));
+            
+            if (n < 0) {
+                if (errno == EINTR) {
+                    if (sigusr1_pending) {
+                        executar_log_top_5(); // Também verifica após o read
+                        sigusr1_pending = 0;
+                    }
+                    close(fd);
+                    continue; 
+                }
+            }
         
         if (n > 0 && buffer[0] == (char)OP_CODE_CONNECT) {
             connection_request_t req;
