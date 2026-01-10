@@ -134,6 +134,7 @@ int read_level(board_t* board, char* filename, char* dirname) {
 }
 
 int read_pacman(board_t* board, int points) {
+
     pacman_t* pacman = &board->pacmans[0];
     pacman->alive = 1;
     pacman->points = points;
@@ -159,7 +160,7 @@ int read_pacman(board_t* board, int points) {
         }
         return 0;
     }
-
+    debug("A tentar abrir ficheiro Pacman: '%s'\n", board->pacman_file);
     int fd = open(board->pacman_file, O_RDONLY);
     if (fd < 0) return -1;
 

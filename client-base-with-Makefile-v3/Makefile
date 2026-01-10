@@ -46,6 +46,7 @@ folders:
 	@mkdir -p $(OBJ_DIR)
 	@mkdir -p $(BIN_DIR)
 
+
 # Limpeza total
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)
